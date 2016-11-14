@@ -240,6 +240,8 @@ import static com.oracle.graal.java.BytecodeParserOptions.UseGuardedIntrinsics;
 import static com.oracle.graal.nodes.graphbuilderconf.IntrinsicContext.CompilationContext.INLINE_DURING_PARSING;
 import static com.oracle.graal.nodes.type.StampTool.isPointerNonNull;
 import static java.lang.String.format;
+import static jdk.vm.ci.code.MemoryBarriers.LOAD_STORE;
+import static jdk.vm.ci.code.MemoryBarriers.STORE_STORE;
 import static jdk.vm.ci.meta.DeoptimizationAction.InvalidateRecompile;
 import static jdk.vm.ci.meta.DeoptimizationAction.InvalidateReprofile;
 import static jdk.vm.ci.meta.DeoptimizationReason.JavaSubroutineMismatch;
@@ -366,6 +368,7 @@ import com.oracle.graal.nodes.extended.GuardingNode;
 import com.oracle.graal.nodes.extended.IntegerSwitchNode;
 import com.oracle.graal.nodes.extended.LoadHubNode;
 import com.oracle.graal.nodes.extended.LoadMethodNode;
+import com.oracle.graal.nodes.extended.MembarNode;
 import com.oracle.graal.nodes.extended.ValueAnchorNode;
 import com.oracle.graal.nodes.graphbuilderconf.GraphBuilderConfiguration;
 import com.oracle.graal.nodes.graphbuilderconf.GraphBuilderConfiguration.BytecodeExceptionMode;
@@ -594,6 +597,8 @@ public class BytecodeParser implements GraphBuilderContext {
 
     private int lastBCI; // BCI of lastInstr. This field is for resolving instrumentation target.
 
+    private boolean needsReturnMembar = false; // Constructor has write to final field.
+
     protected BytecodeParser(GraphBuilderPhase.Instance graphBuilderInstance, StructuredGraph graph, BytecodeParser parent, ResolvedJavaMethod method,
                     int entryBCI, IntrinsicContext intrinsicContext) {
         this.bytecodeProvider = intrinsicContext == null ? new ResolvedJavaMethodBytecodeProvider() : intrinsicContext.getBytecodeProvider();
@@ -614,6 +619,7 @@ public class BytecodeParser implements GraphBuilderContext {
         this.entryBCI = entryBCI;
         this.parent = parent;
         this.lastBCI = -1;
+        this.needsReturnMembar = false;
 
         assert code.getCode() != null : "method must contain bytecodes: " + method;
 
@@ -1229,6 +1235,9 @@ public class BytecodeParser implements GraphBuilderContext {
         StoreFieldNode storeFieldNode = new StoreFieldNode(receiver, field, value);
         append(storeFieldNode);
         storeFieldNode.setStateAfter(this.createFrameState(stream.nextBCI(), storeFieldNode));
+        if (field.isFinal() && method.isConstructor()) {
+            needsReturnMembar = true;
+        }
     }
 
     /**
@@ -1989,6 +1998,11 @@ public class BytecodeParser implements GraphBuilderContext {
     }
 
     private void beforeReturn(ValueNode x, JavaKind kind) {
+        if (needsReturnMembar) {
+            FixedNode membarInstr = new MembarNode(LOAD_STORE | STORE_STORE);
+            append(membarInstr);
+        }
+
         if (graph.method() != null && graph.method().isJavaLangObjectInit()) {
             /*
              * Get the receiver from the initial state since bytecode rewriting could do arbitrary
